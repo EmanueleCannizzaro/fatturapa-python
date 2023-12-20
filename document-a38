@@ -1,0 +1,124 @@
+#!/usr/bin/python3
+import argparse
+import logging
+import subprocess
+import os
+import re
+import sys
+
+
+log = logging.getLogger("document-a38")
+
+
+class Fail(Exception):
+    pass
+
+
+def sample_output(cmd, max_lines=None, max_line_length=None, returncode=0):
+    res = subprocess.run("./" + cmd, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+    if res.returncode != returncode:
+        raise RuntimeError(f"{cmd} return code is {res.returncode} instead of {returncode}")
+    lines = []
+    for idx, line in enumerate(res.stdout.splitlines()):
+        if max_lines is not None and idx >= max_lines:
+            lines.append("…")
+            break
+        if max_line_length is not None and len(line) > max_line_length:
+            lines.append(line[:max_line_length] + "…")
+        else:
+            lines.append(line)
+    return lines
+
+
+def generate_output(mo):
+    cmd = mo.group("cmd")
+    output = mo.group("output")
+    returncode = mo.group("result")
+    if returncode is not None:
+        returncode = int(returncode)
+    else:
+        returncode = 0
+
+    # Autodetect max_lines and max_line_length
+    lines = output.splitlines()
+
+    max_lines = None
+    if lines[-1] == "…":
+        max_lines = len(lines) - 1
+
+    max_line_length = None
+    for l in lines:
+        if len(l) > 1 and l[-1] == "…":
+            max_line_length = len(l) - 1
+            break
+
+    lines = [
+        "```text",
+        f"$ {cmd}",
+    ]
+    lines.extend(sample_output(cmd, max_lines, max_line_length, returncode))
+    if returncode != 0:
+        lines.append("$ echo $?")
+        lines.append(str(returncode))
+    lines.append("```")
+
+    return "\n".join(lines) + "\n"
+
+
+def process_md(fname):
+    with open(fname, "rt") as fd:
+        content = fd.read()
+
+    # print(re.search(
+    #     r"```text\s*\n"
+    #     r"(?P<output>.+?)"
+    #     r"```"
+    #     , content, re.S))
+
+    new_content = re.sub(
+        r"```text[ \t]*\n"
+        r"\$ (?P<cmd>a38tool [^\n]+)\n"
+        r"(?P<output>.+?)"
+        r"(?:\$ echo \$\?\s*\n(?P<result>\d+)\s*\n)?"
+        r"```[ \t]*\n", generate_output, content, flags=re.S)
+
+    if new_content == content:
+        return False
+
+    with open(fname, "wt") as fd:
+        fd.write(new_content)
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Update a38tool examples in markdown documentation")
+    parser.add_argument("--verbose", "-v", action="store_true", help="verbose output")
+    parser.add_argument("--debug", action="store_true", help="debug output")
+
+    args = parser.parse_args()
+
+    log_format = "%(asctime)-15s %(levelname)s %(message)s"
+    level = logging.WARN
+    if args.debug:
+        level = logging.DEBUG
+    elif args.verbose:
+        level = logging.INFO
+    logging.basicConfig(level=level, stream=sys.stderr, format=log_format)
+
+    for fn in os.listdir("."):
+        if not fn.endswith(".md"):
+            continue
+        if process_md(fn):
+            log.warning("%s: updated", fn)
+        else:
+            log.info("%s: unchanged", fn)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Fail as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
+    except Exception:
+        log.exception("uncaught exception")
